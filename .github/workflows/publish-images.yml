@@ -1,0 +1,63 @@
+name: Publish images to GHCR
+
+on:
+  push:
+    paths:
+      - Dockerfile.postgres
+      - Dockerfile.postgrespro
+      - .github/workflows/publish-images.yml
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    if: github.ref_name == github.event.repository.default_branch && github.ref_type == 'branch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: publish-ghcr
+      cancel-in-progress: true
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Sign in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and publish PostgreSQL
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/postgres-gis"
+          docker buildx build --platform linux/amd64 --file Dockerfile.postgres \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag "$image:latest" \
+            --tag "$image:sha-$GITHUB_SHA" \
+            --push .
+
+      - name: Build and publish Postgres Pro
+        env:
+          PGPRO_ACCESS_KEY: ${{ secrets.PGPRO_ACCESS_KEY }}
+        run: |
+          if [ -z "$PGPRO_ACCESS_KEY" ]; then
+            echo "::notice::Postgres Pro skipped because PGPRO_ACCESS_KEY is empty."
+            exit 0
+          fi
+
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/postgrespro-gis"
+          docker buildx build --platform linux/amd64 --file Dockerfile.postgrespro \
+            --no-cache-filter pgpro-packages \
+            --secret id=pgpro_access_key,env=PGPRO_ACCESS_KEY \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag "$image:latest" \
+            --tag "$image:sha-$GITHUB_SHA" \
+            --push .
