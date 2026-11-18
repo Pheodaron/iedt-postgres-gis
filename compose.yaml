@@ -1,0 +1,71 @@
+x-spatial-settings: &spatial-settings
+  platform: linux/amd64
+  mem_limit: 4g
+  cpus: 2.0
+  shm_size: 512m
+  stop_grace_period: 60s
+  environment:
+    POSTGRES_DB: gis
+    POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+  command:
+    - postgres
+    - -c
+    - shared_buffers=1GB
+    - -c
+    - effective_cache_size=3GB
+    - -c
+    - work_mem=8MB
+    - -c
+    - maintenance_work_mem=256MB
+    - -c
+    - autovacuum_work_mem=64MB
+    - -c
+    - max_wal_size=4GB
+    - -c
+    - max_parallel_workers=2
+    - -c
+    - max_parallel_workers_per_gather=1
+
+services:
+  postgres:
+    <<: *spatial-settings
+    image: postgres-gis:18-3.7.0-4.0.2
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    secrets:
+      - source: postgres_password
+        target: postgres_password
+
+  postgrespro:
+    <<: *spatial-settings
+    image: postgrespro-gis:18-3.7.0-4.0.2
+    build:
+      context: .
+      dockerfile: Dockerfile.postgrespro
+      secrets:
+        - source: pgpro_access_key
+          target: pgpro_access_key
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgrespro-data:/var/lib/postgresql
+    secrets:
+      - source: postgrespro_password
+        target: postgres_password
+
+volumes:
+  postgres-data:
+  postgrespro-data:
+
+secrets:
+  postgres_password:
+    environment: POSTGRES_PASSWORD
+  postgrespro_password:
+    environment: POSTGRESPRO_PASSWORD
+  pgpro_access_key:
+    environment: PGPRO_ACCESS_KEY

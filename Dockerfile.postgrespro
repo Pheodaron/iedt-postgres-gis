@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+
+# Из официального образа PostgreSQL берём скрипт инициализации.
+FROM postgres:18-trixie@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc AS entrypoint
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS debian
+
+# Пакеты сервера и заголовки загружаем из репозитория Postgres Pro.
+FROM debian AS pgpro-packages
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=secret,id=pgpro_access_key,required=true \
+    --mount=type=tmpfs,target=/tmp/pgpro-apt <<'SH'
+set -eu
+
+access_key="$(cat /run/secrets/pgpro_access_key)"
+test -n "$access_key"
+repo_url=https://repo.postgrespro.ru/std/std-18
+apt_dir=/tmp/pgpro-apt
+auth_file="$apt_dir/auth.conf"
+archive_key="$apt_dir/pgpro.asc"
+sources_list="$apt_dir/pgpro.list"
+
+# APT читает реквизиты из временного файла в tmpfs.
+umask 077
+printf 'machine %s/ login %s\n' "$repo_url" "$access_key" > "$auth_file"
+umask 022
+
+curl -fsS --user "$access_key:" \
+    --output "$archive_key" \
+    "$repo_url/keys/GPG-KEY-POSTGRESPRO"
+printf 'deb [signed-by=%s] %s/debian trixie main\n' "$archive_key" "$repo_url" \
+    > "$sources_list"
+
+# Для этих .deb используем только подписанный репозиторий Postgres Pro.
+pgpro_apt() {
+    apt-get \
+        -o Dir::Etc::sourcelist="$sources_list" \
+        -o Dir::Etc::sourceparts=- \
+        -o Dir::Etc::netrc="$auth_file" \
+        "$@"
+}
+
+pgpro_apt update
+install -d -o _apt /packages
+cd /packages
+pgpro_apt download \
+    postgrespro-std-18-server \
+    postgrespro-std-18-client \
+    postgrespro-std-18-libs \
+    postgrespro-std-18-contrib \
+    postgrespro-std-18-dev
+rm -rf /var/lib/apt/lists/*
+SH
+
+# Устанавливаем сервер и библиотеки, нужные в рабочем контейнере.
+FROM debian AS runtime-base
+ENV LANG=C.UTF-8 \
+    PG_MAJOR=18 \
+    PGDATA=/var/lib/postgresql/18/docker \
+    PATH=/opt/pgpro/std-18/bin:$PATH
+
+RUN --mount=type=bind,from=pgpro-packages,source=/packages,target=/packages <<'SH'
+set -eu
+
+# Блокируем автоматический запуск службы при установке пакетов.
+printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+chmod 755 /usr/sbin/policy-rc.d
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    /packages/postgrespro-std-18-server_*.deb \
+    /packages/postgrespro-std-18-client_*.deb \
+    /packages/postgrespro-std-18-libs_*.deb \
+    /packages/postgrespro-std-18-contrib_*.deb \
+    ca-certificates \
+    gosu \
+    libgeos-c1t64 \
+    libjson-c5 \
+    libproj25 \
+    libprotobuf-c1 \
+    libstdc++6 \
+    libxml2 \
+    proj-data \
+    tzdata
+rm -rf /var/lib/apt/lists/*
+rm /usr/sbin/policy-rc.d
+
+install -d -o postgres -g postgres -m 3775 /var/run/postgresql
+install -d -o postgres -g postgres -m 0755 /var/lib/postgresql/18
+install -d -o postgres -g postgres -m 0700 "$PGDATA"
+
+# initdb применяет этот шаблон при создании нового кластера.
+cat <<'CONF' >> "$(pg_config --sharedir)/postgresql.conf.sample"
